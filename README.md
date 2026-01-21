@@ -252,6 +252,10 @@ Energy comparison between LAMMPS (real units, kcal/mol) and GROMACS (values take
 - The converter writes `sorted_<input>` next to the input file to make downstream parsing more robust.
 - Output files are written in the current directory; existing files with the same names will be overwritten.
 
+## License
+
+MIT License. See `LICENSE`.
+
 ## Python API usage
 
 You can also import and call the main conversion function:
