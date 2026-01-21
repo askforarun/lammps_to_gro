@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "lammps_to_gro"
+doi: 10.5281/zenodo.18329896
+type: software
+authors:
+  - family-names: "Sridhar"
+    given-names: "Arun Srikanth"
+repository-code: "https://github.com/askforarun/lammps_to_gro"
+abstract: >
+  Converts LAMMPS data files (with embedded force-field parameters) into
+  GROMACS topology and coordinate outputs, enabling continuation of simulation
+  or analysis workflows in GROMACS.
