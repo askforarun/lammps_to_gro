@@ -54,6 +54,16 @@ python lammps_to_gro.py \
   --residue-names PVA PVA GLU
 ```
 
+### Running LAMMPS (optional)
+
+To run the LAMMPS simulation with the example input file:
+
+```bash
+lmp_png < example_lammps_input.lmp
+```
+
+This will generate energy output that can be compared with the GROMACS results for validation.
+
 ### Subcommand-style (optional)
 
 The argument parser accepts being called with an extra leading token (useful if you later wire this into a parent CLI):
