@@ -2,7 +2,7 @@
 
 Convert a LAMMPS data file (with force field parameters in the `* Coeffs` sections) into GROMACS topology (`.itp`/`.top`) and coordinate (`.gro`) files.
 
-This is useful when you have a bonded network (e.g., polymers/hydrogels) built in LAMMPS and want to continue simulation or analysis in GROMACS.
+This is useful when you have a system built in LAMMPS and want to continue simulation or analysis in GROMACS.
 
 ## What it generates
 
@@ -10,7 +10,7 @@ This is useful when you have a bonded network (e.g., polymers/hydrogels) built i
 - `<molecule>.itp` — `[moleculetype]`, `[atoms]`, `[bonds]`, `[pairs]`, `[angles]`, `[dihedrals]`
 - `topol.top` — `#include` statements + `[system]` + `[molecules]`
 - `system.gro` — coordinates + box vectors (`--gro-out none` to skip)
-- `sorted_<input>` — copy of the input with key sections sorted by ID
+- `sorted_<input>` — copy of the input with key sections sorted by atom ID
 
 ## Unit conversions
 
@@ -43,7 +43,7 @@ pip install networkx
 
 Sample data included in this repo:
 
-- `data.aftercrosslink_coeff` (PVA–Glutaraldehyde crosslinked hydrogel network)
+- `data.aftercrosslink_coeff`
 
 ```bash
 python lammps_to_gro.py \
@@ -116,6 +116,31 @@ python lammps_to_gro.py \
 ```
 
 Reference: GROMACS topology formats (see “funct” column in bonded sections):
+`https://manual.gromacs.org/documentation/current/reference-manual/topologies/topology-file-formats.html`
+
+### LAMMPS to GROMACS Function Mapping
+
+The script currently supports these LAMMPS force field styles and translates them to GROMACS function types:
+
+**Supported LAMMPS Input:**
+```bash
+pair_style      lj/cut/coul/cut 9 9
+pair_modify     mix arithmetic tail no
+bond_style      harmonic
+angle_style     harmonic
+dihedral_style  fourier
+```
+
+**GROMACS Translation (Currently Supported):**
+- `pair_style lj/cut/coul/cut` → `nb-func 1` (Lennard-Jones + Coulomb cutoff)
+- `bond_style harmonic` → `bond-funct 1` (harmonic bonds)
+- `angle_style harmonic` → `angle-funct 1` (harmonic angles)
+- `dihedral_style fourier` → `dihedral-funct 1` (proper dihedrals)
+- `improper-funct 4` (periodic impropers - default for LAMMPS impropers)
+
+These are the function types currently supported by the script. You can override them with the CLI flags shown above if needed.
+
+Reference: GROMACS topology formats (see "funct" column in bonded sections):
 `https://manual.gromacs.org/documentation/current/reference-manual/topologies/topology-file-formats.html`
 
 ### Skip writing `system.gro`
