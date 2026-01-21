@@ -1,0 +1,31 @@
+# This file was created Wed Jan 21 17:41:47 2026
+# Created by:
+#                 :-) GROMACS - gmx energy, 2024.2-Homebrew (-:
+# 
+# Executable:   /opt/homebrew/bin/../Cellar/gromacs/2024.2/bin/gmx
+# Data prefix:  /opt/homebrew/bin/../Cellar/gromacs/2024.2
+# Working dir:  /Users/arunsrikanthsridhar/Downloads/lammps_to_gro
+# Command line:
+#   gmx energy -f md.edr
+# gmx energy is part of G R O M A C S:
+#
+# Gromacs Runs One Microsecond At Cannonball Speeds
+#
+@    title "GROMACS Energies"
+@    xaxis  label "Time (ps)"
+@    yaxis  label "(kJ/mol)"
+@TYPE xy
+@ view 0.15, 0.15, 0.75, 0.85
+@ legend on
+@ legend box on
+@ legend loctype view
+@ legend 0.78, 0.8
+@ legend length 2
+@ s0 legend "Bond"
+@ s1 legend "Angle"
+@ s2 legend "Proper Dih."
+@ s3 legend "LJ-14"
+@ s4 legend "Coulomb-14"
+@ s5 legend "LJ (SR)"
+@ s6 legend "Coulomb (SR)"
+    0.000000  25180.796875  12247.126953  3034.096924  1598.668701  -35776.066406  -1684.366211  19407.439453

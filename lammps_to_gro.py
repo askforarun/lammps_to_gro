@@ -739,7 +739,7 @@ def main(argv=None):
 
     # Handle itp output filename
     itp_out = args.itp_out if args.itp_out else f"{args.molecule}.itp"
-
+    
     # Handle gro output (allow 'none' to skip)
     gro_out = None if args.gro_out.lower() == "none" else args.gro_out
 
