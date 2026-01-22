@@ -237,7 +237,7 @@ Energy comparison between LAMMPS (real units, kcal/mol) and GROMACS (values take
 - **Coulomb interactions**: Moderate difference (~14%) 
 
 
-**Note**: GROMACS Coulomb interactions include both short-range and 1-4 terms. The ~14% difference is typical when converting between different MD packages due to variations in electrostatics implementation (no PME has been used both in GROMACS and LAMMPS in the simulation).
+**Note**: GROMACS Coulomb interactions include both short-range and 1-4 terms. The ~14% difference is typical when converting between different MD packages due to variations in electrostatics implementation (no PME has been used both in GROMACS and LAMMPS).
 
 ## Notes
 
