@@ -240,8 +240,8 @@ Energy comparison between LAMMPS (real units, kcal/mol) and GROMACS (values take
 **Key Findings:**
 - **Bonded terms**: Excellent agreement (< 0.3% difference)
 - **LJ interactions**: Good agreement (~2% difference)
-- **Coulomb interactions**: Moderate difference (~14%) due to different 1-4 scaling and implementation details
-- **Overall**: The conversion successfully preserves the force field parameters with high accuracy
+- **Coulomb interactions**: Moderate difference (~14%) 
+
 
 **Note**: GROMACS Coulomb interactions include both short-range and 1-4 terms. The ~14% difference is typical when converting between different MD packages due to variations in electrostatics implementation.
 
