@@ -9,7 +9,7 @@ This is useful when you have a system built in LAMMPS and want to continue simul
 - `forcefield.itp` — `[defaults]` + `[atomtypes]` (LJ parameters)
 - `<molecule>.itp` — `[moleculetype]`, `[atoms]`, `[bonds]`, `[pairs]`, `[angles]`, `[dihedrals]`
 - `topol.top` — `#include` statements + `[system]` + `[molecules]`
-- `system.gro` — coordinates + box vectors (`--gro-out none` to skip)
+- `system.gro` — coordinates + box vectors
 - `sorted_<input>` — copy of the input with key sections sorted by atom ID
 
 ## Unit conversions
@@ -142,12 +142,6 @@ These are the function types currently supported by the script. You can override
 
 Reference: GROMACS topology formats (see "funct" column in bonded sections):
 `https://manual.gromacs.org/documentation/current/reference-manual/topologies/topology-file-formats.html`
-
-### Skip writing `system.gro`
-
-```bash
-python lammps_to_gro.py --infile your.data --gro-out none
-```
 
 ### All CLI options
 

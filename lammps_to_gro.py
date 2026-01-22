@@ -315,7 +315,7 @@ def build_gromacs_itps_and_gro_from_lammps(
     # 2) Parse header + sections (Masses/Atoms + bonded sections + coeff sections)
     # 3) Convert units (Å->nm, kcal/mol->kJ/mol) and validate total charge
     # 4) Generate bonded terms + 1-4 pairs
-    # 5) Write GROMACS outputs: forcefield.itp, <molecule>.itp, topol.top, system.gro (optional)
+    # 5) Write GROMACS outputs: forcefield.itp, <molecule>.itp, topol.top, system.gro
     if itp_outfile is None:
         itp_outfile = f"{molecule_name}.itp"
 
@@ -579,20 +579,19 @@ def build_gromacs_itps_and_gro_from_lammps(
     logger.info(f"Wrote {topol_outfile}")
 
     # -------------------- system.gro --------------------
-    if gro_outfile:
-        lx, ly, lz = box_nm
-        with open(gro_outfile, "w") as f:
-            f.write(f"{molecule_name}\n")
-            f.write(f"{n_atoms:5d}\n")
-            for aid, molid, atype, q, x, y, z in atoms:
-                resnr, resname, local = res_assign[aid]
-                aname = f"{resname[0]}{local}"
-                f.write(
-                    f"{resnr % 100000:5d}{resname:>5s}{aname:>5s}"
-                    f"{aid % 100000:5d}{x:8.3f}{y:8.3f}{z:8.3f}\n"
-                )
-            f.write(f"{lx:10.5f}{ly:10.5f}{lz:10.5f}\n")
-        logger.info(f"Wrote {gro_outfile}")
+    lx, ly, lz = box_nm
+    with open(gro_outfile, "w") as f:
+        f.write(f"{molecule_name}\n")
+        f.write(f"{n_atoms:5d}\n")
+        for aid, molid, atype, q, x, y, z in atoms:
+            resnr, resname, local = res_assign[aid]
+            aname = f"{resname[0]}{local}"
+            f.write(
+                f"{resnr % 100000:5d}{resname:>5s}{aname:>5s}"
+                f"{aid % 100000:5d}{x:8.3f}{y:8.3f}{z:8.3f}\n"
+            )
+        f.write(f"{lx:10.5f}{ly:10.5f}{lz:10.5f}\n")
+    logger.info(f"Wrote {gro_outfile}")
 
     logger.info("Conversion complete!")
 
@@ -662,7 +661,7 @@ Examples:
     parser.add_argument(
         "--gro-out",
         default="system.gro",
-        help="Output coordinate file (default: system.gro; use 'none' to skip)"
+        help="Output coordinate file (default: system.gro)"
     )
 
     # Residue options
@@ -740,8 +739,8 @@ def main(argv=None):
     # Handle itp output filename
     itp_out = args.itp_out if args.itp_out else f"{args.molecule}.itp"
     
-    # Handle gro output (allow 'none' to skip)
-    gro_out = None if args.gro_out.lower() == "none" else args.gro_out
+    # Handle gro output
+    gro_out = args.gro_out
 
     # Handle residue blocks
     residue_sizes = tuple(args.residue_sizes) if args.residue_sizes else None
@@ -773,11 +772,10 @@ def main(argv=None):
         print(f"  {args.forcefield_out}")
         print(f"  {itp_out}")
         print(f"  {args.topol_out}")
-        if gro_out:
-            print(f"  {gro_out}")
+        print(f"  {gro_out}")
 
         print("\nNext steps (GROMACS commands):")
-        print(f"  gmx grompp -f md.mdp -c {gro_out or 'system.gro'} -p {args.topol_out} -o md.tpr")
+        print(f"  gmx grompp -f md.mdp -c {gro_out} -p {args.topol_out} -o md.tpr")
         print("  gmx mdrun -v -deffnm md")
 
     except FileNotFoundError as e:
