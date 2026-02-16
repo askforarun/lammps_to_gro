@@ -60,6 +60,29 @@ def get_atomic_number(atom_name, element_map):
     return ATOMIC_NUMBERS[elem]
 
 
+def get_element_symbol(atom_type, type_name_map, element_map):
+    # Get element symbol for a given atom type
+    atomtype_name = type_name_map.get(atom_type, None)
+    if atomtype_name is None:
+        raise ValueError(f"Missing type_name_map entry for atom type {atom_type}")
+    return element_map[atomtype_name].upper()
+
+
+def generate_atom_name(resname, local_index, atom_type, type_name_map, element_map):
+    """Generate atom name with element tag when possible.
+
+    Format: element + '_' + residue_first_letter + local_index (e.g., C_P1).
+    Falls back to the legacy residue_first_letter + local_index when the
+    element cannot be resolved.
+    """
+    try:
+        element = get_element_symbol(atom_type, type_name_map, element_map)
+        return f"{element}_{resname[0]}{local_index}"
+    except (ValueError, KeyError):
+        # Fallback to original naming if element lookup fails
+        return f"{resname[0]}{local_index}"
+
+
 def read_section(lines, key):
     # Return the non-blank content lines for a named LAMMPS section (e.g., "Atoms", "Bonds").
     for i, line in enumerate(lines):
@@ -117,50 +140,69 @@ def normalize_blocks(sizes, names):
     return tuple(map(int, sizes)), tuple(map(str, names))
 
 
-def build_residue_assignment(n_atoms, sizes, names):
-    # Assign each atom ID to (resnr, resname, local_index) using repeating residue blocks.
+def build_residue_assignment(n_atoms, sizes, names, repeat=False):
+    """
+    Assign each atom ID to (resnr, resname, local_index).
+    If repeat is True, the residue block pattern is repeated until all atoms are assigned.
+    Otherwise, the blocks are consumed once; assumes sum(sizes) == n_atoms.
+    """
     assignment = {}
     aid, resnr, block_idx = 1, 1, 0
-    while aid <= n_atoms:
-        size = sizes[block_idx % len(sizes)]
-        name = names[block_idx % len(names)]
-        for local in range(1, size + 1):
-            if aid > n_atoms:
-                break
-            assignment[aid] = (resnr, name, local)
-            aid += 1
-        resnr += 1
-        block_idx += 1
+
+    if repeat:
+        while aid <= n_atoms:
+            size = sizes[block_idx % len(sizes)]
+            name = names[block_idx % len(names)]
+            for local in range(1, size + 1):
+                if aid > n_atoms:
+                    break
+                assignment[aid] = (resnr, name, local)
+                aid += 1
+            resnr += 1
+            block_idx += 1
+    else:
+        for size, name in zip(sizes, names):
+            for local in range(1, size + 1):
+                assignment[aid] = (resnr, name, local)
+                aid += 1
+            resnr += 1
+
     return assignment
 
 
 def find_1_4_pairs_bfs(n_atoms, edges):
     # Compute 1-4 pairs: atom pairs separated by exactly 3 bonds, using a BFS per atom.
-    # Build adjacency list
+    # Optimized to avoid O(N) scans per atom by collecting distance-3 nodes on the fly.
     adj = [[] for _ in range(n_atoms + 1)]
     for i, j in edges:
         adj[i].append(j)
         adj[j].append(i)
 
     pairs = []
+    seen = [0] * (n_atoms + 1)
+    dist = [0] * (n_atoms + 1)
+    epoch = 0
+
     for start in range(1, n_atoms + 1):
-        dist = [-1] * (n_atoms + 1)
-        dist[start] = 0
+        epoch += 1
         queue = deque([start])
+        seen[start] = epoch
+        dist[start] = 0
 
         while queue:
             u = queue.popleft()
             if dist[u] == 3:
                 continue
             for v in adj[u]:
-                if dist[v] < 0:
-                    dist[v] = dist[u] + 1
+                if seen[v] == epoch:
+                    continue
+                seen[v] = epoch
+                dist[v] = dist[u] + 1
+                if dist[v] == 3:
+                    if v > start:
+                        pairs.append((start, v))
+                else:
                     queue.append(v)
-
-        # Collect pairs where distance is exactly 3
-        for v in range(start + 1, n_atoms + 1):
-            if dist[v] == 3:
-                pairs.append((start, v))
 
     return pairs
 
@@ -180,6 +222,342 @@ def find_1_4_pairs_networkx(n_atoms, edges):
                 pairs.add((u, v))
 
     return sorted(pairs)
+
+
+def validate_header_box(lines):
+    """Validate that box dimensions are present and properly formatted."""
+    box_found = {"x": False, "y": False, "z": False}
+    
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("Masses"):
+            break
+        
+        t = s.split()
+        if len(t) == 4:
+            if t[2] == "xlo" and t[3] == "xhi":
+                try:
+                    xlo, xhi = float(t[0]), float(t[1])
+                    if xhi <= xlo:
+                        raise ValueError(f"Invalid box dimensions: xhi ({xhi}) <= xlo ({xlo})")
+                    box_found["x"] = True
+                except ValueError:
+                    raise ValueError(f"Invalid box dimension format: {s}")
+            elif t[2] == "ylo" and t[3] == "yhi":
+                try:
+                    ylo, yhi = float(t[0]), float(t[1])
+                    if yhi <= ylo:
+                        raise ValueError(f"Invalid box dimensions: yhi ({yhi}) <= ylo ({ylo})")
+                    box_found["y"] = True
+                except ValueError:
+                    raise ValueError(f"Invalid box dimension format: {s}")
+            elif t[2] == "zlo" and t[3] == "zhi":
+                try:
+                    zlo, zhi = float(t[0]), float(t[1])
+                    if zhi <= zlo:
+                        raise ValueError(f"Invalid box dimensions: zhi ({zhi}) <= zlo ({zlo})")
+                    box_found["z"] = True
+                except ValueError:
+                    raise ValueError(f"Invalid box dimension format: {s}")
+    
+    missing = [dim for dim, found in box_found.items() if not found]
+    if missing:
+        raise ValueError(f"Missing box dimensions for: {', '.join(missing)}")
+    
+    return True
+
+
+def validate_section_format(lines, section_name, expected_columns=None):
+    """Validate that a section has the correct format and expected number of columns."""
+    section_lines = read_section(lines, section_name)
+    
+    if not section_lines:
+        return f"Section '{section_name}' not found"
+    
+    errors = []
+    for i, line in enumerate(section_lines, 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+            
+        parts = stripped.split()
+        if expected_columns and len(parts) < expected_columns:
+            errors.append(f"{section_name} line {i}: expected >= {expected_columns} columns, got {len(parts)}: '{stripped}'")
+            
+        # Validate numeric columns (skip first column which is usually an ID)
+        if section_name == "Masses":
+            try:
+                int(parts[0])  # atom type ID
+                float(parts[1])  # mass
+            except (ValueError, IndexError):
+                errors.append(f"{section_name} line {i}: invalid mass format: '{stripped}' (hint: id mass)")
+        
+        elif section_name == "Atoms":
+            try:
+                int(parts[0])  # atom ID
+                int(parts[1])  # molecule ID
+                int(parts[2])  # atom type
+                float(parts[3])  # charge
+                float(parts[4])  # x
+                float(parts[5])  # y
+                float(parts[6])  # z
+            except (ValueError, IndexError):
+                errors.append(f"{section_name} line {i}: invalid atom format in first 7 columns: '{stripped}' (hint: id mol type q x y z)")
+    
+    return errors if errors else True
+
+
+def validate_pair_coeffs(section_lines):
+    """Validate Pair Coeffs lines: id epsilon sigma (>=3 columns)."""
+    errors = []
+    for i, line in enumerate(section_lines, 1):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        parts = s.split()
+        if len(parts) < 3:
+            errors.append(f"Pair Coeffs line {i}: expected >= 3 columns (id epsilon sigma), got {len(parts)}: '{s}'")
+            continue
+        try:
+            int(parts[0])
+            float(parts[1])
+            float(parts[2])
+        except ValueError:
+            errors.append(f"Pair Coeffs line {i}: non-numeric epsilon/sigma: '{s}' (hint: id epsilon sigma)")
+    return errors if errors else True
+
+
+def validate_bond_coeffs(section_lines):
+    """Validate Bond Coeffs lines: id k r0 (>=3 columns)."""
+    errors = []
+    for i, line in enumerate(section_lines, 1):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        parts = s.split()
+        if len(parts) < 3:
+            errors.append(f"Bond Coeffs line {i}: expected >= 3 columns (id k r0), got {len(parts)}: '{s}'")
+            continue
+        try:
+            int(parts[0])
+            float(parts[1])
+            float(parts[2])
+        except ValueError:
+            errors.append(f"Bond Coeffs line {i}: non-numeric k or r0: '{s}' (hint: id k r0)")
+    return errors if errors else True
+
+
+def validate_angle_coeffs(section_lines):
+    """Validate Angle Coeffs lines: id k theta0 (>=3 columns)."""
+    errors = []
+    for i, line in enumerate(section_lines, 1):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        parts = s.split()
+        if len(parts) < 3:
+            errors.append(f"Angle Coeffs line {i}: expected >= 3 columns (id k theta0), got {len(parts)}: '{s}'")
+            continue
+        try:
+            int(parts[0])
+            float(parts[1])
+            float(parts[2])
+        except ValueError:
+            errors.append(f"Angle Coeffs line {i}: non-numeric k or theta0: '{s}' (hint: id k theta0)")
+    return errors if errors else True
+
+
+def validate_dihedral_coeffs(section_lines):
+    """Validate Dihedral Coeffs lines: id nterms (k mult phi)*."""
+    errors = []
+    for i, line in enumerate(section_lines, 1):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        parts = s.split()
+        if len(parts) < 2:
+            errors.append(f"Dihedral Coeffs line {i}: expected >= 2 columns (id nterms), got {len(parts)}: '{s}'")
+            continue
+        try:
+            dtype = int(parts[0])
+            nterms = int(parts[1])
+        except ValueError:
+            errors.append(f"Dihedral Coeffs line {i}: non-numeric id or nterms: '{s}'")
+            continue
+
+        expected = 2 + 3 * nterms
+        if len(parts) < expected:
+            errors.append(
+                f"Dihedral Coeffs line {i}: expected {expected} columns for {nterms} terms, got {len(parts)}: '{s}' (hint: id nterms k mult phi ...)"
+            )
+            continue
+
+        idx = 2
+        for term in range(nterms):
+            try:
+                float(parts[idx])      # k
+                int(parts[idx + 1])    # mult
+                float(parts[idx + 2])  # phi
+            except ValueError:
+                errors.append(
+                    f"Dihedral Coeffs line {i}: non-numeric term {term + 1} (k mult phi) starting at column {idx + 1}: '{s}'"
+                )
+                break
+            idx += 3
+    return errors if errors else True
+
+
+def validate_improper_coeffs(section_lines):
+    """Validate Improper Coeffs lines: id k d n (>=4 columns)."""
+    errors = []
+    for i, line in enumerate(section_lines, 1):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        parts = s.split()
+        if len(parts) < 4:
+            errors.append(f"Improper Coeffs line {i}: expected >= 4 columns (id k d n), got {len(parts)}: '{s}'")
+            continue
+        try:
+            int(parts[0])
+            float(parts[1])
+            int(parts[2])
+            int(parts[3])
+        except ValueError:
+            errors.append(f"Improper Coeffs line {i}: non-numeric k/d/n: '{s}' (hint: id k d n)")
+    return errors if errors else True
+
+
+def validate_coefficient_consistency(lines):
+    """Validate that each bonded section has its matching coefficient section and vice versa."""
+    mapping = {
+        "Bonds": "Bond Coeffs",
+        "Angles": "Angle Coeffs",
+        "Dihedrals": "Dihedral Coeffs",
+        "Impropers": "Improper Coeffs",
+    }
+    errors = []
+    
+    for bonded_section, coeff_section in mapping.items():
+        bonded_present = bool(read_section(lines, bonded_section))
+        coeff_present = bool(read_section(lines, coeff_section))
+        
+        if bonded_present and not coeff_present:
+            errors.append(f"Found {bonded_section} section but missing {coeff_section} section")
+        if coeff_present and not bonded_present:
+            errors.append(f"Found {coeff_section} section but no corresponding {bonded_section} section")
+    
+    return errors if errors else True
+
+
+def validate_residue_assignment(n_atoms, sizes, names, repeat=False):
+    """Validate residue assignment parameters."""
+    if sizes is None and names is None:
+        return True  # Default assignment
+    
+    if len(sizes) != len(names):
+        raise ValueError(f"residue_sizes ({len(sizes)}) and residue_names ({len(names)}) must have same length")
+    
+    total_atoms = sum(sizes)
+    if total_atoms > n_atoms:
+        raise ValueError(f"Residue assignment requires {total_atoms} atoms but only {n_atoms} atoms found")
+    if total_atoms < n_atoms and not repeat:
+        raise ValueError(
+            "Residue assignment covers only "
+            f"{total_atoms} atoms but {n_atoms} atoms found. "
+            "Residue sizes must sum to exactly n_atoms, or use --repeat to extend pattern"
+        )
+    if total_atoms <= 0:
+        raise ValueError("Residue sizes must sum to a positive number")
+    
+    # Check for invalid sizes
+    for i, size in enumerate(sizes):
+        if size <= 0:
+            raise ValueError(f"Residue size {i+1} is invalid: {size} (must be > 0)")
+    
+    # Check for empty names
+    for i, name in enumerate(names):
+        if not name or not name.strip():
+            raise ValueError(f"Residue name {i+1} is empty")
+    
+    # Warn if --repeat is redundant
+    if repeat and total_atoms == n_atoms:
+        logger.warning("--repeat is redundant: residue pattern size equals total atoms. Pattern will execute exactly once.")
+    
+    return True
+
+
+def validate_atom_type_consistency(atoms, masses):
+    """Validate that all atoms reference valid atom types."""
+    atom_types = set()
+    for atom_line in atoms:
+        parts = atom_line.split()
+        if len(parts) >= 3:
+            try:
+                atom_types.add(int(parts[2]))  # atom type column
+            except ValueError:
+                raise ValueError(f"Invalid atom type in line: '{atom_line}'")
+    
+    mass_types = set(masses.keys())
+    
+    # Check for atom types without mass definitions
+    missing_masses = atom_types - mass_types
+    if missing_masses:
+        raise ValueError(f"Atoms reference undefined atom types: {sorted(missing_masses)}")
+    
+    # Check for mass definitions not used by any atoms
+    unused_masses = mass_types - atom_types
+    if unused_masses:
+        logger.warning(f"Unused atom type definitions: {sorted(unused_masses)}")
+    
+    return True
+
+
+def validate_bonded_connectivity(atoms, bonds, angles, dihedrals, impropers):
+    """Validate that bonded interactions reference valid atom IDs."""
+    if not atoms:
+        return True
+    
+    atom_ids = set()
+    for atom_line in atoms:
+        parts = atom_line.split()
+        if len(parts) >= 1:
+            try:
+                atom_ids.add(int(parts[0]))
+            except ValueError:
+                raise ValueError(f"Invalid atom ID in line: '{atom_line}'")
+    
+    def check_section(section_lines, section_name, num_atoms):
+        if not section_lines:
+            return True
+        
+        for i, line in enumerate(section_lines, 1):
+            parts = line.split()
+            # Format: interaction_id type_id atom1 atom2 [atom3] [atom4]
+            expected_cols = 2 + num_atoms  # interaction_id + type_id + atom IDs
+            if len(parts) < expected_cols:
+                raise ValueError(f"{section_name} line {i}: Expected at least {expected_cols} columns, got {len(parts)}")
+            
+            # Check atom IDs (start at index 2, after interaction_id and type_id)
+            for j in range(2, 2 + num_atoms):
+                try:
+                    atom_id = int(parts[j])
+                    if atom_id not in atom_ids:
+                        raise ValueError(f"{section_name} line {i}: Atom ID {atom_id} not found in Atoms section")
+                except ValueError:
+                    raise ValueError(f"{section_name} line {i}: Invalid atom ID '{parts[j]}'")
+        
+        return True
+    
+    # Validate each bonded section
+    check_section(bonds, "Bonds", 2)      # bond: 2 atom IDs
+    check_section(angles, "Angles", 3)    # angle: 3 atom IDs
+    check_section(dihedrals, "Dihedrals", 4)  # dihedral: 4 atom IDs
+    check_section(impropers, "Impropers", 4)   # improper: 4 atom IDs
+    
+    return True
 
 
 def validate_atom_types(masses, type_name_map):
@@ -294,7 +672,7 @@ def build_gromacs_itps_and_gro_from_lammps(
     system_name="SYSTEM",
     molecule_name="MOL",
     nrexcl=3,
-    defaults=(1, 2, "yes", 0.5, 0.8333),
+    defaults=(1, 2, "yes", 0.5, 0.8333),  # comb-rule 2 = arithmetic mixing (matches LAMMPS mix arithmetic)
     # Residue layout (None = single residue for all atoms)
     residue_block_sizes=None,
     residue_block_names=None,
@@ -305,6 +683,7 @@ def build_gromacs_itps_and_gro_from_lammps(
     improper_funct=4,  # 2=harmonic, 4=periodic
     pairs_funct=1,     # 1=LJ-14, 2=excluded
     pairs_method="bfs",
+    repeat_residue_blocks=False,
     # Validation
     total_charge_tolerance=1e-6,
     # Side outputs
@@ -331,15 +710,58 @@ def build_gromacs_itps_and_gro_from_lammps(
         raise ValueError("pairs_method must be 'bfs' or 'networkx'")
 
     if write_sorted_infile_copy:
-        write_sorted_lammps_data_copy(infile)
+        sorted_infile = write_sorted_lammps_data_copy(infile)
+    else:
+        sorted_infile = infile
 
     # -------------------- Read file --------------------
-    with open(infile) as f:
+    with open(sorted_infile) as f:
         lines = f.readlines()
 
     box_nm = parse_box_from_header(lines)
     logger.info(f"Box dimensions (nm): {box_nm[0]:.3f} x {box_nm[1]:.3f} x {box_nm[2]:.3f}")
 
+    # -------------------- Early validation --------------------
+    logger.info("Performing early validation...")
+    
+    # Validate header and box dimensions
+    validate_header_box(lines)
+    
+    # Validate section formats
+    masses_validation = validate_section_format(lines, "Masses", 2)
+    if masses_validation is not True:
+        raise ValueError(f"Masses section validation failed:\n" + "\n".join(masses_validation))
+    
+    atoms_validation = validate_section_format(lines, "Atoms", 7)
+    if atoms_validation is not True:
+        raise ValueError(f"Atoms section validation failed:\n" + "\n".join(atoms_validation))
+
+    # Validate coefficient sections
+    pairc_validation = validate_pair_coeffs(read_section(lines, "Pair Coeffs"))
+    if pairc_validation is not True:
+        raise ValueError(f"Pair Coeffs validation failed:\n" + "\n".join(pairc_validation))
+
+    bondc_validation = validate_bond_coeffs(read_section(lines, "Bond Coeffs"))
+    if bondc_validation is not True:
+        raise ValueError(f"Bond Coeffs validation failed:\n" + "\n".join(bondc_validation))
+
+    anglec_validation = validate_angle_coeffs(read_section(lines, "Angle Coeffs"))
+    if anglec_validation is not True:
+        raise ValueError(f"Angle Coeffs validation failed:\n" + "\n".join(anglec_validation))
+
+    dihc_validation = validate_dihedral_coeffs(read_section(lines, "Dihedral Coeffs"))
+    if dihc_validation is not True:
+        raise ValueError(f"Dihedral Coeffs validation failed:\n" + "\n".join(dihc_validation))
+
+    improperc_validation = validate_improper_coeffs(read_section(lines, "Improper Coeffs"))
+    if improperc_validation is not True:
+        raise ValueError(f"Improper Coeffs validation failed:\n" + "\n".join(improperc_validation))
+    
+    # Validate coefficient consistency
+    coeff_validation = validate_coefficient_consistency(lines)
+    if coeff_validation is not True:
+        raise ValueError(f"Coefficient consistency validation failed:\n" + "\n".join(coeff_validation))
+    
     # Read sections
     masses_l = read_section(lines, "Masses")
     atoms_l = read_section(lines, "Atoms")
@@ -353,12 +775,39 @@ def build_gromacs_itps_and_gro_from_lammps(
     dihc_l = read_section(lines, "Dihedral Coeffs")
     improperc_l = read_section(lines, "Improper Coeffs")
 
-    if not atoms_l or not masses_l:
-        raise RuntimeError("Atoms or Masses section missing from data file")
+    # Required vs optional sections
+    required_sections = {
+        "Masses": masses_l,
+        "Atoms": atoms_l,
+        "Bonds": bonds_l,
+        "Angles": angles_l,
+        "Dihedrals": diheds_l,
+        "Pair Coeffs": pairc_l,
+        "Bond Coeffs": bondc_l,
+        "Angle Coeffs": anglec_l,
+        "Dihedral Coeffs": dihc_l,
+    }
+    missing_required = [name for name, data in required_sections.items() if not data]
+    if missing_required:
+        raise RuntimeError("Required sections missing or empty: " + ", ".join(missing_required))
+
+    optional_sections = {
+        "Impropers": impropers_l,
+        "Improper Coeffs": improperc_l,
+    }
+    missing_optional = [name for name, data in optional_sections.items() if not data]
+    if missing_optional:
+        logger.warning("Missing or empty optional sections: " + ", ".join(missing_optional))
 
     # -------------------- Parse masses --------------------
     masses = {int(l.split()[0]): float(l.split()[1]) for l in masses_l}
     logger.info(f"Found {len(masses)} atom types")
+
+    # Validate atom type consistency
+    validate_atom_type_consistency(atoms_l, masses)
+    
+    # Validate bonded connectivity
+    validate_bonded_connectivity(atoms_l, bonds_l, angles_l, diheds_l, impropers_l)
 
     # Validate atom types
     validate_atom_types(masses, type_name_map)
@@ -382,15 +831,15 @@ def build_gromacs_itps_and_gro_from_lammps(
     logger.info(f"Found {n_atoms} atoms, total charge: {qtot:.6e}")
 
     # -------------------- Residue assignment --------------------
-    if (residue_block_sizes is None) != (residue_block_names is None):
-        raise ValueError("residue_block_sizes and residue_block_names must be provided together")
-
-    if residue_block_sizes is None and residue_block_names is None:
-        residue_block_sizes = (n_atoms,)
-        residue_block_names = (molecule_name[:3],)
+    if residue_block_sizes is None or residue_block_names is None:
+        raise ValueError("residue_block_sizes and residue_block_names are required")
 
     sizes, names = normalize_blocks(residue_block_sizes, residue_block_names)
-    res_assign = build_residue_assignment(n_atoms, sizes, names)
+    
+    # Validate residue assignment
+    validate_residue_assignment(n_atoms, sizes, names, repeat=repeat_residue_blocks)
+    
+    res_assign = build_residue_assignment(n_atoms, sizes, names, repeat=repeat_residue_blocks)
 
     # -------------------- Parse coefficients --------------------
     # Pair coeffs: type -> (sigma_nm, epsilon_kJ)
@@ -448,6 +897,32 @@ def build_gromacs_itps_and_gro_from_lammps(
         # For GROMACS periodic improper (funct=4): phi_s = 0 or 180 based on d
         phi_s = 0.0 if d > 0 else 180.0
         impropercoeff[itype] = (phi_s, k, n)
+
+    # Validate coefficient coverage
+    missing_paircoeff = set(masses.keys()) - set(paircoeff.keys())
+    if missing_paircoeff:
+        raise RuntimeError(f"Missing Pair Coeffs for atom types: {sorted(missing_paircoeff)}")
+
+    bond_types_in_use = {int(l.split()[1]) for l in bonds_l}
+    missing_bondcoeff = bond_types_in_use - set(bondcoeff.keys())
+    if missing_bondcoeff:
+        raise RuntimeError(f"Missing Bond Coeffs for bond types: {sorted(missing_bondcoeff)}")
+
+    angle_types_in_use = {int(l.split()[1]) for l in angles_l}
+    missing_anglecoeff = angle_types_in_use - set(anglecoeff.keys())
+    if missing_anglecoeff:
+        raise RuntimeError(f"Missing Angle Coeffs for angle types: {sorted(missing_anglecoeff)}")
+
+    dihedral_types_in_use = {int(l.split()[1]) for l in diheds_l}
+    missing_dihedralcoeff = dihedral_types_in_use - set(dihcoeff.keys())
+    if missing_dihedralcoeff:
+        raise RuntimeError(f"Missing Dihedral Coeffs for dihedral types: {sorted(missing_dihedralcoeff)}")
+
+    if impropers_l:
+        improper_types_in_use = {int(l.split()[1]) for l in impropers_l}
+        missing_impropercoeff = improper_types_in_use - set(impropercoeff.keys())
+        if missing_impropercoeff:
+            raise RuntimeError(f"Missing Improper Coeffs for improper types: {sorted(missing_impropercoeff)}")
 
     # -------------------- Parse bonds --------------------
     bonds, edges = [], []
@@ -519,7 +994,7 @@ def build_gromacs_itps_and_gro_from_lammps(
 
     for aid, molid, atype, q, *_ in atoms:
         resnr, resname, local = res_assign[aid]
-        aname = f"{resname[0]}{local}"
+        aname = generate_atom_name(resname, local, atype, type_name_map, element_map)
         mol_lines.append(
             f"{aid:5d} {type_name_map[atype]:6s} {resnr:5d} "
             f"{resname:6s} {aname:6s} {aid:5d} {q: .6f} {masses[atype]:.5f}\n"
@@ -560,8 +1035,6 @@ def build_gromacs_itps_and_gro_from_lammps(
             mol_lines.append(
                 f"{i:5d} {j:5d} {k:5d} {m:5d} {improper_funct} {phi_s:.6f} {ki:.6f} {mult} ; improper type {it}\n"
             )
-    else:
-        logger.warning("No Impropers section found in LAMMPS data file - skipping impropers in ITP")
 
     with open(itp_outfile, "w") as f:
         f.write("".join(mol_lines))
@@ -585,10 +1058,17 @@ def build_gromacs_itps_and_gro_from_lammps(
         f.write(f"{n_atoms:5d}\n")
         for aid, molid, atype, q, x, y, z in atoms:
             resnr, resname, local = res_assign[aid]
-            aname = f"{resname[0]}{local}"
+            # Use the same element-tagged naming scheme as the ITP (fallback to legacy if unresolved)
+            aname = generate_atom_name(
+                resname,
+                local,
+                atype,
+                type_name_map,
+                element_map,
+            )
             f.write(
                 f"{resnr % 100000:5d}{resname:>5s}{aname:>5s}"
-                f"{aid % 100000:5d}{x:8.3f}{y:8.3f}{z:8.3f}\n"
+                f"{aid % 100000:5d}{x:8.4f}{y:8.4f}{z:8.4f}\n"
             )
         f.write(f"{lx:10.5f}{ly:10.5f}{lz:10.5f}\n")
     logger.info(f"Wrote {gro_outfile}")
@@ -664,19 +1144,26 @@ Examples:
         help="Output coordinate file (default: system.gro)"
     )
 
-    # Residue options
+    # Residue assignment (required)
     parser.add_argument(
         "--residue-sizes",
         type=int,
         nargs="+",
-        default=None,
+        required=True,
         help="Atoms per residue type (e.g., 146 31)"
     )
     parser.add_argument(
         "--residue-names",
+        type=str,
         nargs="+",
-        default=None,
-        help="Residue type names (e.g., RES1 RES2)"
+        required=True,
+        help="Residue names for each type (e.g., PVA GLU)"
+    )
+    parser.add_argument(
+        "--repeat",
+        "-R",
+        action="store_true",
+        help="Repeat the residue block pattern until all atoms are assigned"
     )
 
     # Function types for bonded interactions
@@ -726,7 +1213,15 @@ Examples:
         help="Suppress info messages"
     )
 
-    return parser.parse_args(argv)
+    try:
+        return parser.parse_args(argv)
+    except SystemExit as e:
+        # argparse exits with code 2 for argument errors
+        # Map to code 3 for "invalid input" to avoid conflict with file not found (2)
+        if e.code == 2:
+            sys.exit(3)
+        else:
+            raise
 
 
 def main(argv=None):
@@ -758,6 +1253,7 @@ def main(argv=None):
             system_name=args.system,
             residue_block_sizes=residue_sizes,
             residue_block_names=residue_names,
+            repeat_residue_blocks=args.repeat,
             bond_funct=args.bond_funct,
             angle_funct=args.angle_funct,
             dihedral_funct=args.dihedral_funct,
@@ -777,15 +1273,21 @@ def main(argv=None):
         print("\nNext steps (GROMACS commands):")
         print(f"  gmx grompp -f md.mdp -c {gro_out} -p {args.topol_out} -o md.tpr")
         print("  gmx mdrun -v -deffnm md")
+        
+        sys.exit(0)  # Successful completion
 
     except FileNotFoundError as e:
         print(f"\nERROR: Input file not found\n  {e}")
+        sys.exit(2)
     except ValueError as e:
         print(f"\nERROR: Invalid input\n  {e}")
+        sys.exit(3)  # Also used by argparse errors
     except RuntimeError as e:
         print(f"\nERROR: Conversion failed\n  {e}")
+        sys.exit(4)
     except Exception as e:
         print(f"\nERROR: Unexpected error\n  {type(e).__name__}: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
