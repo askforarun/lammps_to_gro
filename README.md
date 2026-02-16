@@ -24,7 +24,7 @@ Convert a LAMMPS data file (with force field parameters in the `* Coeffs` sectio
 - [Tutorial](#tutorial)
   - [CLI with GROMACS Execution](#cli-with-gromacs-execution)
   - [Python API Usage](#python-api-usage)
-  - [Validation](#validation)
+- [Validation](#validation)
 - [Troubleshooting](#troubleshooting)
   - [Common Issues and Solutions](#common-issues-and-solutions)
   - [Exit Codes Reference](#exit-codes-reference)
@@ -438,7 +438,10 @@ for data_file, mol_name, sys_name in polymers:
     print(f"Converted {data_file} with repeat pattern")
 ```
 
-### Validation
+---
+
+## Validation
+
 The following validation uses the **multi-ethanol example** (`multi_ethanol_data.lammps`) from Example 1 above.
 
 **LAMMPS:**
