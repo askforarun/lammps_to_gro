@@ -6,6 +6,7 @@ Convert a LAMMPS data file (with force field parameters in the `* Coeffs` sectio
 
 ## Table of Contents
 - [What This Tool Does](#what-this-tool-does)
+- [Force Field Mapping & Compatibility](#force-field-mapping--compatibility)
 - [Platform Compatibility](#platform-compatibility)
 - [What You Need](#what-you-need)
 - [Command Reference & Options](#command-reference--options)
@@ -100,12 +101,16 @@ Pair Coeffs
 ...
 ```
 
-## Supported LAMMPS Force Field Styles
+---
+
+## Force Field Mapping & Compatibility
+
+### Supported LAMMPS Force Field Styles
 ```bash
 pair_style      lj/cut/coul/cut 9 9   # or lj/cut/coul/long 9 9 (any cutoff value)
 pair_modify     mix arithmetic tail no
 bond_style      harmonic
-angle_style     harmonic
+angle_style      harmonic
 dihedral_style  fourier
 ```
 
@@ -118,6 +123,13 @@ Suggested reading: https://manual.gromacs.org/documentation/current/reference-ma
 | `angle_style harmonic` | `angle-funct 1` | Harmonic angles: E = k(θ - θ₀)² |
 | `dihedral_style fourier` | `dihedral-funct 1` | Fourier dihedrals |
 | `improper_funct 4` | `improper-funct 4` | Periodic impropers (default) |
+
+### Combination Rules & 1-4 Scaling
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `comb-rule` | `2` | Arithmetic mixing: σ_ij = (σ_i + σ_j)/2, ε_ij = √(ε_i × ε_j). Matches LAMMPS `pair_modify mix arithmetic`. |
+| `fudgeLJ` | `0.5` | 1-4 LJ scaling factor. Matches LAMMPS `special_bonds lj 0.0 0.0 0.5`. |
+| `fudgeQQ` | `0.8333` | 1-4 Coulomb scaling factor. Matches LAMMPS `special_bonds coul 0.0 0.0 0.8333`. |
 
 ---
 
@@ -164,30 +176,9 @@ python lammps_to_gro.py --help
 - `--residue-sizes 73 73 31 --residue-names ASP BEN ETH` → Atoms 1-73 → ASP, 74-146 → BEN, 147-177 → ETH (non-repeat)
 - `--residue-sizes 50 --residue-names MON --repeat` → Pattern (50 atoms per MON residue) repeats for all atoms
 
-### Function Types (GROMACS `funct`)
-Suggested reading: https://manual.gromacs.org/documentation/current/reference-manual/topologies/topology-file-formats.html  
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--bond-funct` | Bond function type | `1` |
-| `--angle-funct` | Angle function type | `1` |
-| `--dihedral-funct` | Dihedral function type | `1` |
-| `--improper-funct` | Improper function type | `4` |
-| `--pairs-funct` | Pair function type | `1` |
-| `--pairs-method` | Pair generation method | `bfs` |
 
 
-### Combination Rules & 1-4 Scaling
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `comb-rule` | `2` | Arithmetic mixing: σ_ij = (σ_i + σ_j)/2, ε_ij = √(ε_i × ε_j). Matches LAMMPS `pair_modify mix arithmetic`. |
-| `fudgeLJ` | `0.5` | 1-4 LJ scaling factor. Matches LAMMPS `special_bonds lj 0.0 0.0 0.5`. |
-| `fudgeQQ` | `0.8333` | 1-4 Coulomb scaling factor. Matches LAMMPS `special_bonds coul 0.0 0.0 0.8333`. |
 
-### What It Generates
-- `forcefield.itp`, `<molecule>.itp`, `topol.top`, `system.gro`
-
-### Unit Conversions
-- Å → nm; kcal/mol → kJ/mol; force constants scaled appropriately.
 
 ---
 
