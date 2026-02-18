@@ -26,24 +26,6 @@ python lammps_to_gro.py \
 gmx grompp -f md.mdp -c system.gro -p topol.top -o md.tpr
 gmx mdrun -v -deffnm md
 ```
-
-## ✨ Features
-
-- **Seamless Conversion**: Automatically converts LAMMPS data files with force field parameters to GROMACS format
-- **Force Field Support**: Supports harmonic bonds/angles, Fourier and OPLS dihedrals, Lennard-Jones potentials
-- **Unit Conversion**: Handles automatic unit conversions (Å→nm, kcal/mol→kJ/mol)
-- **Residue Management**: Flexible residue assignment with repeat patterns for polymers
-- **Cross-Platform**: Works on Linux, macOS, and Windows
-- **Validated**: Energy-validated against LAMMPS reference calculations
-
-## 🎯 Use Cases
-
-- **Cross-Platform MD Workflows**: Move simulations between LAMMPS and GROMACS
-- **Polymer Simulations**: Convert polymer networks with repeat patterns
-- **Drug Discovery**: Integrate LAMMPS-prepared systems into GROMACS analysis pipelines
-- **Academic Research**: Enable collaboration between different MD software users
-- **Force Field Development**: Test force fields across multiple simulation packages
-
 ---
 
 ## Table of Contents
