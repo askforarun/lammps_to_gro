@@ -11,11 +11,10 @@ nstlog                  = 100
 cutoff-scheme           = Verlet
 vdwtype                 = Cut-off
 vdw-modifier            = none
-rvdw                    = 0.4
+rvdw                    = 0.9
 coulombtype             = Cut-off
 coulomb-modifier        = none
-rcoulomb                = 0.4
+rcoulomb                = 0.9
 pbc                     = xyz
 periodic_molecules      = yes
 constraints             = none
-

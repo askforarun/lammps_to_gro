@@ -64,6 +64,7 @@ Run molecular dynamics simulations in GROMACS using systems prepared in LAMMPS.
 - `Masses`, `Atoms`, `Bonds`, `Angles`, `Dihedrals`, `Impropers` (if present)
 - `* Coeffs` sections (`Pair`, `Bond`, `Angle`, `Dihedral`, `Improper`)
 - Missing any required section aborts conversion (CLI exit code 4).
+- Atom IDs in `Atoms` must be contiguous and 1-based (`1..N`).
 
 **Atoms section format**
 ```
@@ -108,10 +109,10 @@ Pair Coeffs
 ### Supported LAMMPS Force Field Styles
 ```bash
 pair_style      lj/cut/coul/cut 9 9   # or lj/cut/coul/long 9 9 (any cutoff value)
-pair_modify     mix arithmetic tail no
 bond_style      harmonic
 angle_style      harmonic
-dihedral_style  fourier
+dihedral_style  fourier     # periodic dihedrals
+dihedral_style  opls        # OPLS dihedrals 
 ```
 
 ### LAMMPS to GROMACS Mapping
@@ -122,14 +123,22 @@ Suggested reading: https://manual.gromacs.org/documentation/current/reference-ma
 | `bond_style harmonic` | `bond-funct 1` | Harmonic bonds: E = k(r - r₀)² |
 | `angle_style harmonic` | `angle-funct 1` | Harmonic angles: E = k(θ - θ₀)² |
 | `dihedral_style fourier` | `dihedral-funct 1` | Fourier dihedrals |
-| `improper_funct 4` | `improper-funct 4` | Periodic impropers (default) |
+| `dihedral_style opls` | `dihedral-funct 3` | OPLS dihedrals converted to Ryckaert-Bellemans form |
+| `improper_style cvff` | `improper-funct 4` | CVFF impropers mapped to periodic improper form (`phi_s`, `k`, `n`) |
+
 
 ### Combination Rules & 1-4 Scaling
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `comb-rule` | `2` | Arithmetic mixing: σ_ij = (σ_i + σ_j)/2, ε_ij = √(ε_i × ε_j). Matches LAMMPS `pair_modify mix arithmetic`. |
-| `fudgeLJ` | `0.5` | 1-4 LJ scaling factor. Matches LAMMPS `special_bonds lj 0.0 0.0 0.5`. |
-| `fudgeQQ` | `0.8333` | 1-4 Coulomb scaling factor. Matches LAMMPS `special_bonds coul 0.0 0.0 0.8333`. |
+Choose a preset with `--comb-rule`:
+
+| Preset | `comb-rule` | `fudgeLJ` | `fudgeQQ` | Typical match |
+|--------|-------------|-----------|-----------|---------------|
+| `amber` (default) | `2` | `0.5` | `0.8333` | LAMMPS `pair_modify mix arithmetic` + `special_bonds ... coul 0.8333` |
+| `opls` | `2` | `0.5` | `0.5` | LAMMPS `pair_modify mix arithmetic` + `special_bonds ... coul 0.5` |
+
+Notes:
+- Both presets use arithmetic LJ mixing (`comb-rule 2`): `σ_ij = (σ_i + σ_j)/2`, `ε_ij = sqrt(ε_i * ε_j)`.
+- `fudgeLJ` is `0.5` for both presets (matches `special_bonds lj 0.0 0.0 0.5`).
+- Only `fudgeQQ` changes between presets.
 
 ---
 
@@ -151,6 +160,7 @@ python lammps_to_gro.py --help
 | `--infile` | Input LAMMPS data file | Required |
 | `--molecule` | Molecule name for `.itp` | `MOL` |
 | `--system` | System name for topology | `SYSTEM` |
+| `--comb-rule` | Nonbonded preset for `[ defaults ]` (`amber`→`2, 0.5, 0.8333`; `opls`→`2, 0.5, 0.5`) | `amber` |
 | `--gro-out` | Output coordinate file | `system.gro` |
 | `--forcefield-out` | Output forcefield file | `forcefield.itp` |
 | `--itp-out` | Output molecule topology | `<molecule>.itp` |
@@ -205,14 +215,13 @@ pip install networkx
 
 ## How It Works
 
-1) **File Reading & Validation** — parse header box dimensions; validate section formats (Masses, Atoms, etc.); check coefficient consistency and atom type coverage; ensure every interaction type has corresponding parameters; creates `sorted_<input>` copy with key sections sorted by numeric IDs (always generated).
+1) **File Reading & Validation** — parse header box dimensions; validate section formats (Masses, Atoms, etc.); check coefficient consistency and atom type coverage; ensure every interaction type has corresponding parameters; creates `sorted_<input>` copy with key sections sorted by numeric IDs (always generated). Section parsing is header-based (so internal blank lines do not truncate sections), and comment lines (`# ...`) are ignored during data parsing.
 
-2) **Data Parsing** — parse masses (type ID → mass), atoms (ID, mol ID, type, charge, coordinates), and all bonded interactions; convert units (Å→nm, kcal/mol→kJ/mol); validate total charge neutrality; scale force constants appropriately. Generate atom names using pattern `element_residue_first_letter + local_index` (e.g., residue "ASP", carbon atom at index 5 → "C_A5"). The output preserves original LAMMPS atom IDs for global numbering (first column in `.gro` file), while local indices in atom names reset to 1 for each new residue, ensuring compatibility with bonded interactions.
+2) **Data Parsing** — parse masses (type ID → mass), atoms (ID, mol ID, type, charge, coordinates), and all bonded interactions; convert units (Å→nm, kcal/mol→kJ/mol); validate total charge neutrality; scale force constants appropriately. Atom IDs are validated as contiguous and 1-based (`1..N`) before topology generation. Generate atom names using pattern `element_residue_first_letter + local_index` (e.g., residue "ASP", carbon atom at index 5 → "C_A5"). The output preserves original LAMMPS atom IDs for global numbering (first column in `.gro` file), while local indices in atom names reset to 1 for each new residue, ensuring compatibility with bonded interactions.
 
-3) **Residue Assignment** — assign atoms to residues using block-based patterns (or default single residue); generate residue numbers and local atom indices; validate residue sizes/names arrays match in length; ensure total residue atoms equals system atoms (non-repeat mode) or pattern can repeat (repeat mode).  
+3) **Residue Assignment** — assign atoms to residues using block-based patterns from required `--residue-sizes` and `--residue-names`; generate residue numbers and local atom indices; validate residue sizes/names arrays match in length; ensure total residue atoms equals system atoms (non-repeat mode) or pattern can repeat (repeat mode).  
    *Example*: `--residue-sizes 73 73 31 --residue-names ASP BEN ETH` → Atoms 1-73 → ASP, 74-146 → BEN, 147-177 → ETH (non-repeat).  
    *Example with repeat*: `--residue-sizes 50 --residue-names MON --repeat` → Pattern (50 atoms per MON residue) repeats for all atoms.  
-   *Default*: All atoms → single residue (first 3 chars of molecule name).
 
 4) **Force Field Conversion** — convert LAMMPS coefficients to GROMACS format; map atom types to GROMACS atomtype names; validate all atoms reference defined atom types; detect orphaned coefficient sections; warn about unused atom type definitions.
 
@@ -250,7 +259,8 @@ python lammps_to_gro.py \
   --infile mixed_data.lammps \
   --molecule MIXED \
   --system SIMULATION \
-  --residue-sizes 21 24 45 \ # 21 atoms (1 aspirin), 24 atoms (2 benzene × 12 atoms each), 45 atoms (5 ethanol × 9 atoms each)
+  # 21 atoms (1 aspirin), 24 atoms (2 benzene × 12 atoms each), 45 atoms (5 ethanol × 9 atoms each)
+  --residue-sizes 21 24 45 \
   --residue-names ASP BEN ETH
 ```
 
@@ -298,6 +308,30 @@ python lammps_to_gro.py \
   --infile multi_ethanol_data.lammps \
   --residue-sizes 90 \
   --residue-names ETH
+
+# with explicit GROMACS function types (all defaults shown)
+python lammps_to_gro.py \
+  --infile multi_ethanol_data.lammps \
+  --molecule ETHANOL \
+  --system POLYMER \
+  --residue-sizes 90 \
+  --residue-names ETH \
+  --bond-funct 1 \
+  --angle-funct 1 \
+  --dihedral-funct 1 \
+  --improper-funct 4 \
+  --pairs-funct 1
+
+# OPLS dihedrals with RB conversion (for OPLS-style dihedral coeffs: type k1 k2 k3 k4)
+python lammps_to_gro.py \
+  --infile data.benzene \
+  --molecule benzene \
+  --system benzene_system \
+  --residue-sizes 12 \
+  --residue-names BEN \
+  --comb-rule opls \
+  --dihedral-funct 3 \
+  --improper-funct 4
 
 # multiple identical residue blocks (mixed_data.lammps)
 python lammps_to_gro.py \
@@ -444,19 +478,27 @@ for data_file, mol_name, sys_name in polymers:
 
 The following validation uses the **multi-ethanol example** (`multi_ethanol_data.lammps`) from Example 1 above.
 
-**LAMMPS:**
-```bash
-lmp < example_lammps_input.lmp
-```
+Energy comparison between LAMMPS (real units, kcal/mol) and GROMACS (kJ/mol converted to kcal/mol) for `multi_ethanol_data.lammps`.
 
-**GROMACS:**
+**Commands used:**
+
 ```bash
+# Convert LAMMPS data to GROMACS topology/coordinates
+python lammps_to_gro.py \
+  --infile multi_ethanol_data.lammps \
+  --molecule ETHANOL \
+  --system POLYMER \
+  --residue-sizes 90 \
+  --residue-names ETH
+
+# LAMMPS single-point energy (input: example_lammps_input.lmp)
+lmp < example_lammps_input.lmp
+
+# GROMACS single-point energy decomposition
 gmx grompp -f md.mdp -c system.gro -p topol.top -o md.tpr -maxwarn 5
 gmx mdrun -v -deffnm md
 echo "1 2 3 4 5 6 7 8" | gmx energy -f md.edr -o energy.xvg
 ```
-
-Energy comparison between LAMMPS (real units, kcal/mol) and GROMACS (kJ/mol converted to kcal/mol) for `multi_ethanol_data.lammps`:
 
 | Interaction | LAMMPS (kcal/mol) | GROMACS (kJ/mol) | GROMACS (kcal/mol) | Match |
 |-------------|-------------------|------------------|-------------------|-------|
@@ -467,15 +509,68 @@ Energy comparison between LAMMPS (real units, kcal/mol) and GROMACS (kJ/mol conv
 | Coulomb | -38.499 | -161.08 | -38.50 | ✅ |
 | **Total** | -33.37 | -139.63 | -33.38 | ✅ |
 
-Note: Requires `pair_modify mix arithmetic` in LAMMPS to match GROMACS `comb-rule 2`.
+Note: This comparison assumes `pair_modify mix arithmetic` in LAMMPS (GROMACS `comb-rule 2`). Small differences are expected due to numerical precision and floating-point handling; the total potential energy matches within ~0.1%.
 
 ---
+
+### OPLS/Ryckaert-Bellemans Validation
+
+Energy comparison for `data.benzene` with OPLS dihedrals converted to Ryckaert-Bellemans (`--dihedral-funct 3`, `--comb-rule opls`; see additional CLI examples).
+
+**Commands used:**
+
+```bash
+# Convert LAMMPS data to GROMACS topology/coordinates
+python lammps_to_gro.py \
+  --infile data.benzene \
+  --molecule benzene \
+  --system benzene_system \
+  --residue-sizes 12 \
+  --residue-names BEN \
+  --comb-rule opls \
+  --dihedral-funct 3 \
+  --improper-funct 4
+
+# Keep generated system.gro for GROMACS validation.
+# LAMMPS single-point energy (input: in.benzene, special_bonds ... coul 0.5)
+lmp < in.benzene
+
+# GROMACS single-point energy decomposition
+gmx grompp -f md.mdp -c system.gro -p topol.top -o md.tpr -maxwarn 5
+gmx mdrun -v -deffnm md
+echo "1 2 3 4 5 6 7 8 9" | gmx energy -f md.edr -o energy_benzene_opls_exact.xvg
+```
+
+| Interaction | LAMMPS (kcal/mol) | GROMACS (kJ/mol) | GROMACS (kcal/mol) | Match |
+|-------------|-------------------|------------------|-------------------|-------|
+| Bond | 0.2255 | 0.9436 | 0.2255 | ✅ |
+| Angle | 0.001318 | 0.005521 | 0.001320 | ✅ |
+| RB Dihedral | 0.0003246 | 0.001345 | 0.0003215 | ✅ |
+| Improper | 1.61e-05 | 6.73e-05 | 1.61e-05 | ✅ |
+| LJ (14+SR) | 5.3283 | 22.2938 | 5.3284 | ✅ |
+| Coulomb (14+SR) | 2.7207 | 11.3834 | 2.7208 | ✅ |
+| **Total** | 8.2762 | 34.6277 | 8.2762 | ✅ |
+
+Note: This comparison assumes `special_bonds ... coul 0.5` in LAMMPS (and `--comb-rule opls` in conversion). Small differences are expected due to coordinate precision and floating-point handling; the total potential energy matches within ~0.2%.
+
+**OPLS → RB conversion formulas used:**
+```
+C0 = K2 + (K1 + K3)/2
+C1 = (-K1 + 3*K3)/2
+C2 = -K2 + 4*K4
+C3 = -2*K3
+C4 = -4*K4
+C5 = 0
+```
+
+Where K1-K4 are the LAMMPS OPLS coefficients (converted to kJ/mol).
 
 ## Troubleshooting
 
 **Charge neutrality error** — ensure charges sum to zero.  
 **Missing required sections** — add any absent `Masses`/`Atoms`/`Bonds`/`Angles`/`Dihedrals` and all `* Coeffs`.  
 **Missing coefficient coverage** — provide coeffs for every type referenced.  
+**Atom ID validation error** — ensure `Atoms` IDs are contiguous and 1-based (`1..N`) with no gaps.  
 **Residue assignment mismatch** — sizes must sum to atom count (non-repeat) or be positive (repeat); names length must match sizes.  
 **CLI argument errors** — re-run with `--help`.  
 **File not found** — verify `--infile` path.

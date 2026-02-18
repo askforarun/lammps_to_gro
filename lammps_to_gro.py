@@ -24,6 +24,54 @@ ATOMIC_NUMBERS = {
     "CL": 17, "BR": 35, "I": 53
 }
 
+# Mass ranges for element detection (atomic mass units)
+MASS_TO_ELEMENT = [
+    (1.0, 1.1, "H"),      # Hydrogen ~1.008
+    (12.0, 12.1, "C"),    # Carbon ~12.011
+    (14.0, 14.1, "N"),    # Nitrogen ~14.007
+    (15.9, 16.1, "O"),    # Oxygen ~15.999
+    (19.0, 19.1, "F"),    # Fluorine ~18.998
+    (30.9, 31.1, "P"),    # Phosphorus ~30.974
+    (32.0, 32.1, "S"),    # Sulfur ~32.065
+    (35.4, 35.5, "CL"),   # Chlorine ~35.453
+    (79.9, 80.0, "BR"),   # Bromine ~79.904
+    (126.9, 127.0, "I"),  # Iodine ~126.904
+]
+
+
+def detect_element_from_mass(mass):
+    """Detect element symbol from atomic mass."""
+    for low, high, element in MASS_TO_ELEMENT:
+        if low <= mass <= high:
+            return element
+    raise ValueError(f"Cannot detect element from mass {mass}. Add entry to MASS_TO_ELEMENT.")
+
+
+def auto_generate_type_maps(masses):
+    """Auto-generate type_name_map and element_map from masses.
+    
+    Creates unique atomtype names like C1, C2, H1, H2 based on element and type ID.
+    """
+    type_name_map = {}
+    element_map = {}
+    element_counts = {}
+    
+    for tid in sorted(masses.keys()):
+        mass = masses[tid]
+        element = detect_element_from_mass(mass)
+        
+        # Count occurrences of each element to create unique names
+        if element not in element_counts:
+            element_counts[element] = 0
+        element_counts[element] += 1
+        
+        # Create atomtype name like C1, C2, H1, H2
+        atomtype_name = f"{element.lower()}{element_counts[element]}"
+        type_name_map[tid] = atomtype_name
+        element_map[atomtype_name] = element
+    
+    return type_name_map, element_map
+
 # Default LAMMPS atom type ID -> GROMACS atom type name mapping
 DEFAULT_TYPE_NAME_MAP = {
     1: "c3", 2: "oh", 3: "hc", 4: "h1", 5: "ho", 6: "c6",
@@ -40,6 +88,22 @@ DEFAULT_ELEMENT_MAP = {
 # Unit conversion factors
 ANGSTROM_TO_NM = 0.1
 KCAL_TO_KJ = 4.184
+
+# Known LAMMPS section headers for robust section scanning
+SECTION_HEADERS = (
+    "Masses",
+    "Pair Coeffs",
+    "Bond Coeffs",
+    "Angle Coeffs",
+    "Dihedral Coeffs",
+    "Improper Coeffs",
+    "Atoms",
+    "Bonds",
+    "Angles",
+    "Dihedrals",
+    "Impropers",
+    "Velocities",
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -83,6 +147,20 @@ def generate_atom_name(resname, local_index, atom_type, type_name_map, element_m
         return f"{resname[0]}{local_index}"
 
 
+def format_gro_name(name, width=5, keep_tail=False):
+    # Normalize names for strict fixed-width GRO fields.
+    s = "".join(ch for ch in str(name) if ch.isalnum()) or "X"
+    if len(s) > width:
+        s = s[-width:] if keep_tail else s[:width]
+    return f"{s:>{width}s}"
+
+
+def is_section_header_line(line):
+    # Return True if a stripped line looks like a LAMMPS section header.
+    s = line.strip()
+    return any(s == h or s.startswith(h + " ") for h in SECTION_HEADERS)
+
+
 def read_section(lines, key):
     # Return the non-blank content lines for a named LAMMPS section (e.g., "Atoms", "Bonds").
     for i, line in enumerate(lines):
@@ -92,12 +170,30 @@ def read_section(lines, key):
             # Skip blank lines after header
             while j < len(lines) and not lines[j].strip():
                 j += 1
-            # Collect non-blank lines
-            while j < len(lines) and lines[j].strip():
-                out.append(lines[j])
+            # Collect lines until the next section header; allow internal blank lines.
+            while j < len(lines):
+                s = lines[j].strip()
+                if is_section_header_line(s):
+                    break
+                if s:
+                    out.append(lines[j])
                 j += 1
             return out
     return []
+
+
+def iter_data_lines(section_lines):
+    # Yield only non-empty, non-comment lines from a section.
+    for line in section_lines:
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        yield s
+
+
+def has_data_lines(section_lines):
+    # True when a section contains at least one non-comment data line.
+    return any(True for _ in iter_data_lines(section_lines))
 
 
 def parse_box_from_header(lines):
@@ -369,43 +465,99 @@ def validate_angle_coeffs(section_lines):
     return errors if errors else True
 
 
-def validate_dihedral_coeffs(section_lines):
-    """Validate Dihedral Coeffs lines: id nterms (k mult phi)*."""
+def convert_opls_to_rb(k1, k2, k3, k4):
+    """Convert OPLS dihedral coefficients (K1-K4) to Ryckaert-Bellemans format (C0-C5).
+    
+    LAMMPS OPLS format uses K values that are directly equivalent to GROMACS F values.
+    (The 0.5 factor in the LAMMPS potential formula is already accounted for in K.)
+    
+    RB format: V = C0 + C1*cos(psi) + C2*cos^2(psi) + C3*cos^3(psi) + C4*cos^4(psi) + C5*cos^5(psi)
+    where psi = phi - 180 (RB uses trans=0 convention)
+    
+    Conversion formulas (from GROMACS manual):
+    C0 = F2 + (F1 + F3)/2
+    C1 = (-F1 + 3*F3)/2
+    C2 = -F2 + 4*F4
+    C3 = -2*F3
+    C4 = -4*F4
+    C5 = 0
+    
+    Where F1=K1, F2=K2, F3=K3, F4=K4
+    """
+    f1, f2, f3, f4 = k1, k2, k3, k4
+    
+    c0 = f2 + (f1 + f3) / 2
+    c1 = (-f1 + 3 * f3) / 2
+    c2 = -f2 + 4 * f4
+    c3 = -2 * f3
+    c4 = -4 * f4
+    c5 = 0.0
+    
+    return c0, c1, c2, c3, c4, c5
+
+
+def validate_dihedral_coeffs(section_lines, dihedral_funct=1):
+    """Validate Dihedral Coeffs lines based on dihedral_funct parameter.
+    
+    If dihedral_funct=3: expects OPLS format (id k1 k2 k3 k4)
+    Otherwise: expects periodic format (id nterms (k mult phi)*)
+    """
+    if not section_lines:
+        return True
+    
     errors = []
-    for i, line in enumerate(section_lines, 1):
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        parts = s.split()
-        if len(parts) < 2:
-            errors.append(f"Dihedral Coeffs line {i}: expected >= 2 columns (id nterms), got {len(parts)}: '{s}'")
-            continue
-        try:
-            dtype = int(parts[0])
-            nterms = int(parts[1])
-        except ValueError:
-            errors.append(f"Dihedral Coeffs line {i}: non-numeric id or nterms: '{s}'")
-            continue
-
-        expected = 2 + 3 * nterms
-        if len(parts) < expected:
-            errors.append(
-                f"Dihedral Coeffs line {i}: expected {expected} columns for {nterms} terms, got {len(parts)}: '{s}' (hint: id nterms k mult phi ...)"
-            )
-            continue
-
-        idx = 2
-        for term in range(nterms):
+    if dihedral_funct == 3:
+        # OPLS style: id k1 k2 k3 k4 (5 columns total)
+        for i, line in enumerate(section_lines, 1):
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split()
+            if len(parts) != 5:
+                errors.append(f"Dihedral Coeffs line {i}: OPLS style requires 5 columns (id k1 k2 k3 k4), got {len(parts)}: '{s}'")
+                continue
             try:
-                float(parts[idx])      # k
-                int(parts[idx + 1])    # mult
-                float(parts[idx + 2])  # phi
+                int(parts[0])  # dihedral type ID
+                for j in range(1, 5):
+                    float(parts[j])  # k1-k4
             except ValueError:
+                errors.append(f"Dihedral Coeffs line {i}: non-numeric coefficients: '{s}' (hint: id k1 k2 k3 k4)")
+    else:
+        # Periodic style: id nterms (k mult phi)*
+        for i, line in enumerate(section_lines, 1):
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split()
+            if len(parts) < 2:
+                errors.append(f"Dihedral Coeffs line {i}: expected >= 2 columns (id nterms), got {len(parts)}: '{s}'")
+                continue
+            try:
+                dtype = int(parts[0])
+                nterms = int(parts[1])
+            except ValueError:
+                errors.append(f"Dihedral Coeffs line {i}: non-numeric id or nterms: '{s}'")
+                continue
+
+            expected = 2 + 3 * nterms
+            if len(parts) < expected:
                 errors.append(
-                    f"Dihedral Coeffs line {i}: non-numeric term {term + 1} (k mult phi) starting at column {idx + 1}: '{s}'"
+                    f"Dihedral Coeffs line {i}: expected {expected} columns for {nterms} terms, got {len(parts)}: '{s}' (hint: id nterms k mult phi ...)"
                 )
-                break
-            idx += 3
+                continue
+
+            idx = 2
+            for term in range(nterms):
+                try:
+                    float(parts[idx])      # k
+                    int(parts[idx + 1])    # mult
+                    float(parts[idx + 2])  # phi
+                except ValueError:
+                    errors.append(
+                        f"Dihedral Coeffs line {i}: non-numeric term {term + 1} (k mult phi) starting at column {idx + 1}: '{s}'"
+                    )
+                    break
+                idx += 3
     return errors if errors else True
 
 
@@ -441,8 +593,8 @@ def validate_coefficient_consistency(lines):
     errors = []
     
     for bonded_section, coeff_section in mapping.items():
-        bonded_present = bool(read_section(lines, bonded_section))
-        coeff_present = bool(read_section(lines, coeff_section))
+        bonded_present = has_data_lines(read_section(lines, bonded_section))
+        coeff_present = has_data_lines(read_section(lines, coeff_section))
         
         if bonded_present and not coeff_present:
             errors.append(f"Found {bonded_section} section but missing {coeff_section} section")
@@ -492,7 +644,7 @@ def validate_residue_assignment(n_atoms, sizes, names, repeat=False):
 def validate_atom_type_consistency(atoms, masses):
     """Validate that all atoms reference valid atom types."""
     atom_types = set()
-    for atom_line in atoms:
+    for atom_line in iter_data_lines(atoms):
         parts = atom_line.split()
         if len(parts) >= 3:
             try:
@@ -521,7 +673,7 @@ def validate_bonded_connectivity(atoms, bonds, angles, dihedrals, impropers):
         return True
     
     atom_ids = set()
-    for atom_line in atoms:
+    for atom_line in iter_data_lines(atoms):
         parts = atom_line.split()
         if len(parts) >= 1:
             try:
@@ -533,7 +685,7 @@ def validate_bonded_connectivity(atoms, bonds, angles, dihedrals, impropers):
         if not section_lines:
             return True
         
-        for i, line in enumerate(section_lines, 1):
+        for i, line in enumerate(iter_data_lines(section_lines), 1):
             parts = line.split()
             # Format: interaction_id type_id atom1 atom2 [atom3] [atom4]
             expected_cols = 2 + num_atoms  # interaction_id + type_id + atom IDs
@@ -544,10 +696,10 @@ def validate_bonded_connectivity(atoms, bonds, angles, dihedrals, impropers):
             for j in range(2, 2 + num_atoms):
                 try:
                     atom_id = int(parts[j])
-                    if atom_id not in atom_ids:
-                        raise ValueError(f"{section_name} line {i}: Atom ID {atom_id} not found in Atoms section")
                 except ValueError:
                     raise ValueError(f"{section_name} line {i}: Invalid atom ID '{parts[j]}'")
+                if atom_id not in atom_ids:
+                    raise ValueError(f"{section_name} line {i}: Atom ID {atom_id} not found in Atoms section")
         
         return True
     
@@ -567,6 +719,23 @@ def validate_atom_types(masses, type_name_map):
         raise ValueError(
             f"type_name_map missing atom types: {sorted(missing)}\n"
             f"Add mappings for these LAMMPS type IDs to type_name_map."
+        )
+
+
+def validate_contiguous_atom_ids(atom_records):
+    # Enforce contiguous 1..N atom IDs required by residue assignment and BFS pair generation.
+    ids = sorted(aid for aid, *_ in atom_records)
+    n_atoms = len(ids)
+    expected = list(range(1, n_atoms + 1))
+    if ids != expected:
+        missing = sorted(set(expected) - set(ids))
+        extras = sorted(set(ids) - set(expected))
+        raise ValueError(
+            "Atom IDs must be contiguous and 1-based (expected 1..N). "
+            f"Found range {ids[0] if ids else 'NA'}..{ids[-1] if ids else 'NA'} "
+            f"for N={n_atoms}. Missing IDs: {missing[:10]}"
+            f"{'...' if len(missing) > 10 else ''}. "
+            f"Out-of-range IDs: {extras[:10]}{'...' if len(extras) > 10 else ''}."
         )
 
 
@@ -619,23 +788,27 @@ def write_sorted_lammps_data_copy(infile, preview_lines=3):
         start, end = bounds
         segment = lines[start:end]
 
-        keep = []
+        pending = []
         sortable = []
         for line in segment:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
-                keep.append(line)
+                pending.append(line)
                 continue
             first = stripped.split()[0]
             try:
                 idx = int(first)
             except ValueError:
-                keep.append(line)
+                pending.append(line)
                 continue
-            sortable.append((idx, line))
+            sortable.append((idx, pending + [line]))
+            pending = []
 
         sortable.sort(key=lambda x: x[0])
-        sorted_segment = keep + [line for _, line in sortable]
+        sorted_segment = []
+        for _, block in sortable:
+            sorted_segment.extend(block)
+        sorted_segment.extend(pending)
         lines[start:end] = sorted_segment
 
         if preview_lines and sorted_segment:
@@ -698,12 +871,6 @@ def build_gromacs_itps_and_gro_from_lammps(
     if itp_outfile is None:
         itp_outfile = f"{molecule_name}.itp"
 
-    # Use defaults if not provided
-    if type_name_map is None:
-        type_name_map = DEFAULT_TYPE_NAME_MAP.copy()
-    if element_map is None:
-        element_map = DEFAULT_ELEMENT_MAP.copy()
-
     logger.info(f"Reading LAMMPS data file: {infile}")
 
     if pairs_method not in ("bfs", "networkx"):
@@ -749,7 +916,7 @@ def build_gromacs_itps_and_gro_from_lammps(
     if anglec_validation is not True:
         raise ValueError(f"Angle Coeffs validation failed:\n" + "\n".join(anglec_validation))
 
-    dihc_validation = validate_dihedral_coeffs(read_section(lines, "Dihedral Coeffs"))
+    dihc_validation = validate_dihedral_coeffs(read_section(lines, "Dihedral Coeffs"), dihedral_funct)
     if dihc_validation is not True:
         raise ValueError(f"Dihedral Coeffs validation failed:\n" + "\n".join(dihc_validation))
 
@@ -777,31 +944,43 @@ def build_gromacs_itps_and_gro_from_lammps(
 
     # Required vs optional sections
     required_sections = {
-        "Masses": masses_l,
-        "Atoms": atoms_l,
-        "Bonds": bonds_l,
-        "Angles": angles_l,
-        "Dihedrals": diheds_l,
-        "Pair Coeffs": pairc_l,
-        "Bond Coeffs": bondc_l,
-        "Angle Coeffs": anglec_l,
-        "Dihedral Coeffs": dihc_l,
+        "Masses": has_data_lines(masses_l),
+        "Atoms": has_data_lines(atoms_l),
+        "Bonds": has_data_lines(bonds_l),
+        "Angles": has_data_lines(angles_l),
+        "Dihedrals": has_data_lines(diheds_l),
+        "Pair Coeffs": has_data_lines(pairc_l),
+        "Bond Coeffs": has_data_lines(bondc_l),
+        "Angle Coeffs": has_data_lines(anglec_l),
+        "Dihedral Coeffs": has_data_lines(dihc_l),
     }
-    missing_required = [name for name, data in required_sections.items() if not data]
+    missing_required = [name for name, present in required_sections.items() if not present]
     if missing_required:
         raise RuntimeError("Required sections missing or empty: " + ", ".join(missing_required))
 
     optional_sections = {
-        "Impropers": impropers_l,
-        "Improper Coeffs": improperc_l,
+        "Impropers": has_data_lines(impropers_l),
+        "Improper Coeffs": has_data_lines(improperc_l),
     }
-    missing_optional = [name for name, data in optional_sections.items() if not data]
+    missing_optional = [name for name, present in optional_sections.items() if not present]
     if missing_optional:
         logger.warning("Missing or empty optional sections: " + ", ".join(missing_optional))
 
     # -------------------- Parse masses --------------------
-    masses = {int(l.split()[0]): float(l.split()[1]) for l in masses_l}
+    masses = {}
+    for s in iter_data_lines(masses_l):
+        t = s.split()
+        masses[int(t[0])] = float(t[1])
     logger.info(f"Found {len(masses)} atom types")
+
+    # Auto-generate type maps from masses if not provided
+    if type_name_map is None:
+        type_name_map, auto_element_map = auto_generate_type_maps(masses)
+        if element_map is None:
+            element_map = auto_element_map
+        logger.info(f"Auto-generated atomtype names: {type_name_map}")
+    elif element_map is None:
+        element_map = DEFAULT_ELEMENT_MAP.copy()
 
     # Validate atom type consistency
     validate_atom_type_consistency(atoms_l, masses)
@@ -815,8 +994,8 @@ def build_gromacs_itps_and_gro_from_lammps(
     # -------------------- Parse atoms --------------------
     atoms = []
     qtot = 0.0
-    for l in atoms_l:
-        t = l.split()
+    for s in iter_data_lines(atoms_l):
+        t = s.split()
         aid, mol, atype = int(t[0]), int(t[1]), int(t[2])
         q = float(t[3])
         x, y, z = float(t[4]) * ANGSTROM_TO_NM, float(t[5]) * ANGSTROM_TO_NM, float(t[6]) * ANGSTROM_TO_NM
@@ -828,6 +1007,7 @@ def build_gromacs_itps_and_gro_from_lammps(
 
     atoms.sort()
     n_atoms = len(atoms)
+    validate_contiguous_atom_ids(atoms)
     logger.info(f"Found {n_atoms} atoms, total charge: {qtot:.6e}")
 
     # -------------------- Residue assignment --------------------
@@ -843,53 +1023,70 @@ def build_gromacs_itps_and_gro_from_lammps(
 
     # -------------------- Parse coefficients --------------------
     # Pair coeffs: type -> (sigma_nm, epsilon_kJ)
-    paircoeff = {
-        int(l.split()[0]): (
-            float(l.split()[2]) * ANGSTROM_TO_NM,
-            float(l.split()[1]) * KCAL_TO_KJ
+    paircoeff = {}
+    for s in iter_data_lines(pairc_l):
+        t = s.split()
+        paircoeff[int(t[0])] = (
+            float(t[2]) * ANGSTROM_TO_NM,
+            float(t[1]) * KCAL_TO_KJ
         )
-        for l in pairc_l
-    }
 
     # Bond coeffs: type -> (r0_nm, k_kJ_nm2)
-    bondcoeff = {
-        int(l.split()[0]): (
-            float(l.split()[2]) * ANGSTROM_TO_NM,
-            float(l.split()[1]) * KCAL_TO_KJ * 100 * 2  # kcal/mol/A^2 -> kJ/mol/nm^2
+    bondcoeff = {}
+    for s in iter_data_lines(bondc_l):
+        t = s.split()
+        bondcoeff[int(t[0])] = (
+            float(t[2]) * ANGSTROM_TO_NM,
+            float(t[1]) * KCAL_TO_KJ * 100 * 2  # kcal/mol/A^2 -> kJ/mol/nm^2
         )
-        for l in bondc_l
-    }
 
     # Angle coeffs: type -> (theta0_deg, k_kJ_rad2)
-    anglecoeff = {
-        int(l.split()[0]): (
-            float(l.split()[2]),
-            float(l.split()[1]) * KCAL_TO_KJ * 2
+    anglecoeff = {}
+    for s in iter_data_lines(anglec_l):
+        t = s.split()
+        anglecoeff[int(t[0])] = (
+            float(t[2]),
+            float(t[1]) * KCAL_TO_KJ * 2
         )
-        for l in anglec_l
-    }
 
-    # Dihedral coeffs: type -> [(phi, k, mult), ...]
+    # Dihedral coeffs: handle based on dihedral_funct parameter
     dihcoeff = {}
-    for l in dihc_l:
-        t = l.split()
-        dtype = int(t[0])
-        nterms = int(t[1])
-        terms = []
-        i = 2
-        for _ in range(nterms):
-            k = float(t[i]) * KCAL_TO_KJ
-            mult = int(t[i + 1])
-            phi = float(t[i + 2])
-            terms.append((phi, k, mult))
-            i += 3
-        dihcoeff[dtype] = terms
+    
+    if dihedral_funct == 3:
+        # RB function: expect OPLS format (type k1 k2 k3 k4) and convert to C0-C4
+        logger.info("Using RB dihedral function - converting OPLS coefficients to Ryckaert-Bellemans")
+        for s in iter_data_lines(dihc_l):
+            t = s.split()
+            dtype = int(t[0])
+            k1 = float(t[1]) * KCAL_TO_KJ
+            k2 = float(t[2]) * KCAL_TO_KJ
+            k3 = float(t[3]) * KCAL_TO_KJ
+            k4 = float(t[4]) * KCAL_TO_KJ
+            # Convert to RB format
+            c0, c1, c2, c3, c4, c5 = convert_opls_to_rb(k1, k2, k3, k4)
+            dihcoeff[dtype] = (c0, c1, c2, c3, c4, c5)
+    else:
+        # Default periodic function: expect periodic format (id nterms (k mult phi)*)
+        logger.info("Using periodic dihedral function")
+        for s in iter_data_lines(dihc_l):
+            t = s.split()
+            dtype = int(t[0])
+            nterms = int(t[1])
+            terms = []
+            i = 2
+            for _ in range(nterms):
+                k = float(t[i]) * KCAL_TO_KJ
+                mult = int(t[i + 1])
+                phi = float(t[i + 2])
+                terms.append((phi, k, mult))
+                i += 3
+            dihcoeff[dtype] = terms
 
     # Improper coeffs: type -> (k, d, n) for cvff style or (k, chi0) for harmonic
     # Assuming cvff style: K d n (d=1 or -1, n=multiplicity)
     impropercoeff = {}
-    for l in improperc_l:
-        t = l.split()
+    for s in iter_data_lines(improperc_l):
+        t = s.split()
         itype = int(t[0])
         k = float(t[1]) * KCAL_TO_KJ
         d = int(t[2])  # +1 or -1
@@ -903,31 +1100,31 @@ def build_gromacs_itps_and_gro_from_lammps(
     if missing_paircoeff:
         raise RuntimeError(f"Missing Pair Coeffs for atom types: {sorted(missing_paircoeff)}")
 
-    bond_types_in_use = {int(l.split()[1]) for l in bonds_l}
+    bond_types_in_use = {int(s.split()[1]) for s in iter_data_lines(bonds_l)}
     missing_bondcoeff = bond_types_in_use - set(bondcoeff.keys())
     if missing_bondcoeff:
         raise RuntimeError(f"Missing Bond Coeffs for bond types: {sorted(missing_bondcoeff)}")
 
-    angle_types_in_use = {int(l.split()[1]) for l in angles_l}
+    angle_types_in_use = {int(s.split()[1]) for s in iter_data_lines(angles_l)}
     missing_anglecoeff = angle_types_in_use - set(anglecoeff.keys())
     if missing_anglecoeff:
         raise RuntimeError(f"Missing Angle Coeffs for angle types: {sorted(missing_anglecoeff)}")
 
-    dihedral_types_in_use = {int(l.split()[1]) for l in diheds_l}
+    dihedral_types_in_use = {int(s.split()[1]) for s in iter_data_lines(diheds_l)}
     missing_dihedralcoeff = dihedral_types_in_use - set(dihcoeff.keys())
     if missing_dihedralcoeff:
         raise RuntimeError(f"Missing Dihedral Coeffs for dihedral types: {sorted(missing_dihedralcoeff)}")
 
     if impropers_l:
-        improper_types_in_use = {int(l.split()[1]) for l in impropers_l}
+        improper_types_in_use = {int(s.split()[1]) for s in iter_data_lines(impropers_l)}
         missing_impropercoeff = improper_types_in_use - set(impropercoeff.keys())
         if missing_impropercoeff:
             raise RuntimeError(f"Missing Improper Coeffs for improper types: {sorted(missing_impropercoeff)}")
 
     # -------------------- Parse bonds --------------------
     bonds, edges = [], []
-    for l in bonds_l:
-        t = l.split()
+    for s in iter_data_lines(bonds_l):
+        t = s.split()
         bt, i, j = int(t[1]), int(t[2]), int(t[3])
         bonds.append((i, j, bt))
         edges.append((i, j))
@@ -1010,26 +1207,39 @@ def build_gromacs_itps_and_gro_from_lammps(
         mol_lines.append(f"{i:5d} {j:5d} {pairs_funct}\n")
 
     mol_lines.append("\n[ angles ]\n; ai aj ak funct theta k\n")
-    for l in angles_l:
-        t = l.split()
+    for s in iter_data_lines(angles_l):
+        t = s.split()
         at, i, j, k = int(t[1]), int(t[2]), int(t[3]), int(t[4])
         th, ka = anglecoeff[at]
         mol_lines.append(f"{i:5d} {j:5d} {k:5d} {angle_funct} {th:.5f} {ka:.6f} ; type {at}\n")
 
-    mol_lines.append("\n[ dihedrals ]\n; ai aj ak al funct phi k mult\n")
-    for l in diheds_l:
-        t = l.split()
-        dt, i, j, k, m = int(t[1]), int(t[2]), int(t[3]), int(t[4]), int(t[5])
-        for phi, kd, mult in dihcoeff[dt]:
+    mol_lines.append("\n[ dihedrals ]\n")
+    if dihedral_funct == 3:
+        # RB format: ai aj ak al funct c0 c1 c2 c3 c4 c5
+        mol_lines.append("; ai aj ak al funct c0 c1 c2 c3 c4 c5\n")
+        for s in iter_data_lines(diheds_l):
+            t = s.split()
+            dt, i, j, k, m = int(t[1]), int(t[2]), int(t[3]), int(t[4]), int(t[5])
+            c0, c1, c2, c3, c4, c5 = dihcoeff[dt]
             mol_lines.append(
-                f"{i:5d} {j:5d} {k:5d} {m:5d} {dihedral_funct} {phi:.6f} {kd:.6f} {mult} ; type {dt}\n"
+                f"{i:5d} {j:5d} {k:5d} {m:5d} {dihedral_funct} {c0:.6f} {c1:.6f} {c2:.6f} {c3:.6f} {c4:.6f} {c5:.6f} ; type {dt}\n"
             )
+    else:
+        # Periodic format: ai aj ak al funct phi k mult
+        mol_lines.append("; ai aj ak al funct phi k mult\n")
+        for s in iter_data_lines(diheds_l):
+            t = s.split()
+            dt, i, j, k, m = int(t[1]), int(t[2]), int(t[3]), int(t[4]), int(t[5])
+            for phi, kd, mult in dihcoeff[dt]:
+                mol_lines.append(
+                    f"{i:5d} {j:5d} {k:5d} {m:5d} {dihedral_funct} {phi:.6f} {kd:.6f} {mult} ; type {dt}\n"
+                )
 
     # Impropers (second [dihedrals] section with improper function type)
     if impropers_l and impropercoeff:
         mol_lines.append("\n[ dihedrals ] ; impropers\n; ai aj ak al funct phi k mult\n")
-        for l in impropers_l:
-            t = l.split()
+        for s in iter_data_lines(impropers_l):
+            t = s.split()
             it, i, j, k, m = int(t[1]), int(t[2]), int(t[3]), int(t[4]), int(t[5])
             phi_s, ki, mult = impropercoeff[it]
             mol_lines.append(
@@ -1066,8 +1276,10 @@ def build_gromacs_itps_and_gro_from_lammps(
                 type_name_map,
                 element_map,
             )
+            resname5 = format_gro_name(resname, width=5, keep_tail=False)
+            aname5 = format_gro_name(aname, width=5, keep_tail=True)
             f.write(
-                f"{resnr % 100000:5d}{resname:>5s}{aname:>5s}"
+                f"{resnr % 100000:5d}{resname5}{aname5}"
                 f"{aid % 100000:5d}{x:8.4f}{y:8.4f}{z:8.4f}\n"
             )
         f.write(f"{lx:10.5f}{ly:10.5f}{lz:10.5f}\n")
@@ -1183,7 +1395,7 @@ Examples:
         "--dihedral-funct",
         type=int,
         default=1,
-        help="GROMACS dihedral function type: 1=proper, 3=RB, 9=multi (default: 1)"
+        help="GROMACS dihedral function type: 1=proper periodic, 3=OPLS/RB, 9=multi (default: 1)"
     )
     parser.add_argument(
         "--improper-funct",
@@ -1196,6 +1408,17 @@ Examples:
         type=int,
         default=1,
         help="GROMACS pairs function type: 1=LJ-14 (default: 1)"
+    )
+    parser.add_argument(
+        "--comb-rule",
+        type=str,
+        choices=["amber", "opls"],
+        default="amber",
+        help=(
+            "Nonbonded preset for GROMACS [defaults]: "
+            "amber->comb-rule 2, fudgeLJ 0.5, fudgeQQ 0.8333 (default); "
+            "opls->comb-rule 2, fudgeLJ 0.5, fudgeQQ 0.5"
+        ),
     )
 
     # Algorithm options
@@ -1240,6 +1463,11 @@ def main(argv=None):
     # Handle residue blocks
     residue_sizes = tuple(args.residue_sizes) if args.residue_sizes else None
     residue_names = tuple(args.residue_names) if args.residue_names else None
+    nonbonded_presets = {
+        "amber": (2, 0.5, 0.8333),
+        "opls": (2, 0.5, 0.5),
+    }
+    comb_rule_value, fudge_lj, fudge_qq = nonbonded_presets[args.comb_rule]
 
     try:
         # Run conversion
@@ -1251,6 +1479,7 @@ def main(argv=None):
             gro_outfile=gro_out,
             molecule_name=args.molecule,
             system_name=args.system,
+            defaults=(1, comb_rule_value, "yes", fudge_lj, fudge_qq),
             residue_block_sizes=residue_sizes,
             residue_block_names=residue_names,
             repeat_residue_blocks=args.repeat,
