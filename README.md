@@ -137,6 +137,7 @@ bond_style      harmonic
 angle_style      harmonic
 dihedral_style  fourier     # periodic dihedrals
 dihedral_style  opls        # OPLS dihedrals 
+improper_style  cvff        # CVFF impropers 
 ```
 
 ### LAMMPS to GROMACS Mapping
