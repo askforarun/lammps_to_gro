@@ -133,23 +133,24 @@ def get_element_symbol(atom_type, type_name_map, element_map):
 
 
 def generate_atom_name(resname, local_index, atom_type, type_name_map, element_map):
-    """Generate atom name with element tag when possible.
+    """Generate atom name using just the element symbol.
 
-    Format: element + '_' + residue_first_letter + local_index (e.g., C_P1).
-    Falls back to the legacy residue_first_letter + local_index when the
-    element cannot be resolved.
+    Format: element only (H, C, O, N, CL, etc.)
+    Simple and always fits within 5-char GRO limit.
+    GROMACS uses atom indices internally, so duplicate names are fine.
     """
     try:
         element = get_element_symbol(atom_type, type_name_map, element_map)
-        return f"{element}_{resname[0]}{local_index}"
     except (ValueError, KeyError):
-        # Fallback to original naming if element lookup fails
-        return f"{resname[0]}{local_index}"
+        element = resname[0] if resname else "X"
+    
+    return element
 
 
 def format_gro_name(name, width=5, keep_tail=False):
     # Normalize names for strict fixed-width GRO fields.
-    s = "".join(ch for ch in str(name) if ch.isalnum()) or "X"
+    # Keep underscores so atom names stay consistent between .itp and .gro.
+    s = "".join(ch for ch in str(name) if ch.isalnum() or ch == "_") or "X"
     if len(s) > width:
         s = s[-width:] if keep_tail else s[:width]
     return f"{s:>{width}s}"
