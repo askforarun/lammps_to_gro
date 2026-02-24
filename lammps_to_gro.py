@@ -371,7 +371,7 @@ def validate_section_format(lines, section_name, expected_columns=None):
     section_lines = read_section(lines, section_name)
     
     if not section_lines:
-        return f"Section '{section_name}' not found"
+        return [f"Section '{section_name}' not found"]
     
     errors = []
     for i, line in enumerate(section_lines, 1):
@@ -755,7 +755,9 @@ def _find_section_bounds(lines, key):
             while j < len(lines) and not lines[j].strip():
                 j += 1
             start = j
-            while j < len(lines) and lines[j].strip():
+            while j < len(lines):
+                if is_section_header_line(lines[j]):
+                    break
                 j += 1
             end = j
             return start, end
