@@ -17,6 +17,7 @@ git clone https://github.com/askforarun/lammps_to_gro.git
 cd lammps_to_gro
 
 # Convert LAMMPS data to GROMACS format
+# (Example: 90 = 10 ethanol molecules × 9 atoms each)
 python lammps_to_gro.py \
   --infile your_data.lammps \
   --residue-sizes 90 \
@@ -211,9 +212,19 @@ python lammps_to_gro.py --help
 - `--residue-sizes 73 73 31 --residue-names ASP BEN ETH` → Atoms 1-73 → ASP, 74-146 → BEN, 147-177 → ETH (non-repeat)
 - `--residue-sizes 50 --residue-names MON --repeat` → Pattern (50 atoms per MON residue) repeats for all atoms
 
+### What It Generates
+- `sorted_<input>` — sorted copy of LAMMPS data file (always generated)
+- `forcefield.itp` — `[defaults]`, `[atomtypes]` (LJ parameters)
+- `<molecule>.itp` — `[moleculetype]`, `[atoms]`, `[bonds]`, `[pairs]`, `[angles]`, `[dihedrals]`
+- `topol.top` — `#include`s + `[system]` + `[molecules]`
+- `system.gro` — coordinates + box vectors
 
-
-
+### Unit Conversions
+Lengths and energies are converted from LAMMPS (real units) to GROMACS SI-based units:
+- **Length**: Å → nm (× 0.1)
+- **Energy**: kcal/mol → kJ/mol (× 4.184)
+- **Bond force constant**: kcal/mol/Å² → kJ/mol/nm² (× 4.184 × 100 × 2)
+- **Angle force constant**: kcal/mol/rad² → kJ/mol/rad² (× 4.184 × 2)
 
 ---
 
@@ -279,12 +290,13 @@ python lammps_to_gro.py \
 ```
 
 ### Second Example
+Mixed system: 1 aspirin (21 atoms), 2 benzene (24 atoms), 5 ethanol (45 atoms).
+
 ```bash
 python lammps_to_gro.py \
   --infile mixed_data.lammps \
   --molecule MIXED \
   --system SIMULATION \
-  # 21 atoms (1 aspirin), 24 atoms (2 benzene × 12 atoms each), 45 atoms (5 ethanol × 9 atoms each)
   --residue-sizes 21 24 45 \
   --residue-names ASP BEN ETH
 ```

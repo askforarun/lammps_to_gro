@@ -72,13 +72,7 @@ def auto_generate_type_maps(masses):
     
     return type_name_map, element_map
 
-# Default LAMMPS atom type ID -> GROMACS atom type name mapping
-DEFAULT_TYPE_NAME_MAP = {
-    1: "c3", 2: "oh", 3: "hc", 4: "h1", 5: "ho", 6: "c6",
-    7: "os", 8: "h2", 9: "c3", 10: "c6", 11: "c3", 12: "c6",
-}
-
-# Default GROMACS atom type name -> element symbol mapping
+# Default GROMACS atom type name -> element symbol mapping (used when type_name_map is provided but element_map is not)
 DEFAULT_ELEMENT_MAP = {
     "c3": "C", "c6": "C",
     "hc": "H", "h1": "H", "h2": "H",
@@ -849,7 +843,8 @@ def build_gromacs_itps_and_gro_from_lammps(
     molecule_name="MOL",
     nrexcl=3,
     defaults=(1, 2, "yes", 0.5, 0.8333),  # comb-rule 2 = arithmetic mixing (matches LAMMPS mix arithmetic)
-    # Residue layout (None = single residue for all atoms)
+    # Residue layout: residue_block_sizes and residue_block_names are required.
+    # Each defines a block of atoms (e.g. sizes=(73, 31), names=("PVA", "GLU")).
     residue_block_sizes=None,
     residue_block_names=None,
     # Function types for bonded interactions (GROMACS funct column)
